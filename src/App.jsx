@@ -69,6 +69,8 @@ function App() {
   const pointerStartRef = useRef({ x: 0, y: 0, moved: false });
   const modeRef = useRef("idle");
   const blobPulseRef = useRef(0);
+  const mouseParallaxRef = useRef({ x: 0, y: 0 });
+  const smoothedParallaxRef = useRef({ x: 0, y: 0 });
 
   const [playlist, setPlaylist] = useState([]);
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
@@ -79,6 +81,7 @@ function App() {
   const [draggedTokenId, setDraggedTokenId] = useState(null);
   const [mode, setMode] = useState("idle");
   const [blobPulse, setBlobPulse] = useState(0);
+  const [parallaxOffset, setParallaxOffset] = useState({ x: 0, y: 0 });
 
   const IDLE_AMPLITUDE = 16;
   const IDLE_SPEED = 0.0014;
@@ -120,6 +123,9 @@ function App() {
         20,
         height - TOKEN_SIZE - 20
       );
+      
+      // Assign depth: cycle from 1-9 for layered effect
+      const depth = ((index % 3) + 1) + ((Math.floor(index / 3) % 3) * 3);
      
       return {
         ...token,
@@ -133,6 +139,7 @@ function App() {
         animationState: "idle",
         opacity: 1,
         scale: 1,
+        depth: depth,
         snapStartX: originalX,
         snapStartY: originalY,
         snapTargetX: originalX,
@@ -153,6 +160,31 @@ function App() {
     }
 
     return cappedCount ? sum / cappedCount / 255 : 0;
+  };
+
+  const getDepthEffects = (depth) => {
+    // Depth ranges from 1 (far) to 9 (close)
+    // Normalize to 0-1 where 0 is far and 1 is close
+    const normalizedDepth = (depth - 1) / 8;
+    
+    // Blur: far tokens (depth 1-3) get blur, close tokens (7-9) are sharp
+    const blur = Math.max(0, (1 - normalizedDepth) * 3.5);
+    
+    // Scale: far tokens are smaller, close tokens are larger
+    const scaleMultiplier = 0.7 + normalizedDepth * 0.3;
+    
+    // Opacity: far tokens are dimmer, close tokens are brighter
+    const opacityMultiplier = 0.6 + normalizedDepth * 0.4;
+    
+    // Parallax intensity: far objects move less, close objects move more
+    const parallaxIntensity = (normalizedDepth - 0.5) * 2; // -1 to 1
+    
+    return {
+      blur,
+      scaleMultiplier,
+      opacityMultiplier,
+      parallaxIntensity
+    };
   };
 
   const triggerBlobPulse = (amount = 1) => {
@@ -519,10 +551,14 @@ function App() {
       const driftX = Math.cos(timestamp * token.floatSpeed * 0.65 + token.phase) * 4;
       const driftY = Math.sin(timestamp * token.floatSpeed + token.phase) * token.floatAmplitude;
 
+      const depthEffects = getDepthEffects(token.depth);
+      const parallaxX = smoothedParallaxRef.current.x * depthEffects.parallaxIntensity;
+      const parallaxY = smoothedParallaxRef.current.y * depthEffects.parallaxIntensity;
+
       return {
         ...token,
-        x: token.originalX + driftX,
-        y: token.originalY + driftY,
+        x: token.originalX + driftX + parallaxX,
+        y: token.originalY + driftY + parallaxY,
         opacity: 1,
         scale: 1,
         animationState: "idle"
@@ -546,6 +582,11 @@ function App() {
 
       blobPulseRef.current = lerp(blobPulseRef.current, 0, 0.1);
       setBlobPulse(blobPulseRef.current);
+
+      // Smooth parallax movement
+      smoothedParallaxRef.current.x = lerp(smoothedParallaxRef.current.x, mouseParallaxRef.current.x, 0.12);
+      smoothedParallaxRef.current.y = lerp(smoothedParallaxRef.current.y, mouseParallaxRef.current.y, 0.12);
+      setParallaxOffset({ ...smoothedParallaxRef.current });
 
       targetSizeRef.current =
         modeRef.current === "music" ? computeSmoothedAudioSize(timestamp) : computeIdleSize(deltaMs);
@@ -812,6 +853,26 @@ function App() {
   }, [currentTrackIndex, isPlaying]);
 
   useEffect(() => {
+    const handleMouseMove = (event) => {
+      const centerX = window.innerWidth / 2;
+      const centerY = window.innerHeight / 2;
+      
+      // Calculate parallax offset from center, normalized to -1 to 1
+      const offsetX = (event.clientX - centerX) / centerX;
+      const offsetY = (event.clientY - centerY) / centerY;
+      
+      // Scale parallax intensity (28 pixels max deviation)
+      mouseParallaxRef.current = {
+        x: offsetX * 28,
+        y: offsetY * 28
+      };
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    return () => window.removeEventListener("mousemove", handleMouseMove);
+  }, []);
+
+  useEffect(() => {
     if (!audioRef.current || !currentTrackUrl) return;
 
     audioRef.current.src = currentTrackUrl;
@@ -855,7 +916,8 @@ function App() {
     <div
       style={{
         ...styles.page,
-        backgroundImage: `linear-gradient(180deg, rgba(2, 10, 17, 0.2), rgba(2, 10, 17, 0.68)), url(${muniverseBg})`
+        backgroundImage: `linear-gradient(180deg, rgba(2, 10, 17, 0.2), rgba(2, 10, 17, 0.68)), url(${muniverseBg})`,
+        backgroundPosition: `${parallaxOffset.x * 0.1}px ${parallaxOffset.y * 0.1}px`
       }}
     >
       <input
@@ -876,33 +938,39 @@ function App() {
       </div>
 
       <div style={styles.scene}>
-        {tokens.map((token) => (
-          <button
-            key={token.id}
-            type="button"
-            aria-label={token.label}
-            title={token.label}
-            onPointerDown={(event) => handleTokenPointerDown(event, token.id)}
-            style={{
-              ...styles.tokenButton,
-              left: token.x,
-              top: token.y,
-              zIndex: draggedTokenId === token.id ? 6 : 3,
-              transition:
-                token.animationState === "dragging"
-                  ? "none"
-                  : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 320ms ease-out, filter 180ms ease-out",
-              opacity: token.opacity,
-              transform: `translate3d(0, 0, 0) scale(${token.scale})`,
-              filter:
-                token.animationState === "dragging"
-                  ? "drop-shadow(0 18px 34px rgba(0, 0, 0, 0.34))"
-                  : "drop-shadow(0 14px 24px rgba(0, 0, 0, 0.24))"
-            }}
-          >
-            <img src={token.image} alt={token.label} style={styles.tokenImage} draggable={false} />
-          </button>
-        ))}
+        {tokens.map((token) => {
+          const depthEffects = getDepthEffects(token.depth);
+          const parallaxX = parallaxOffset.x * depthEffects.parallaxIntensity;
+          const parallaxY = parallaxOffset.y * depthEffects.parallaxIntensity;
+          
+          return (
+            <button
+              key={token.id}
+              type="button"
+              aria-label={token.label}
+              title={token.label}
+              onPointerDown={(event) => handleTokenPointerDown(event, token.id)}
+              style={{
+                ...styles.tokenButton,
+                left: token.x,
+                top: token.y,
+                zIndex: draggedTokenId === token.id ? 6 : 2 + token.depth,
+                transition:
+                  token.animationState === "dragging"
+                    ? "none"
+                    : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 320ms ease-out, filter 180ms ease-out",
+                opacity: token.opacity * depthEffects.opacityMultiplier,
+                transform: `translate3d(${parallaxX}px, ${parallaxY}px, 0) scale(${token.scale * depthEffects.scaleMultiplier})`,
+                filter:
+                  token.animationState === "dragging"
+                    ? `drop-shadow(0 18px 34px rgba(0, 0, 0, 0.34)) blur(0px)`
+                    : `drop-shadow(0 14px 24px rgba(0, 0, 0, 0.24)) blur(${depthEffects.blur}px)`
+              }}
+            >
+              <img src={token.image} alt={token.label} style={styles.tokenImage} draggable={false} />
+            </button>
+          );
+        })}
 
         <button
           ref={blobRef}
@@ -942,7 +1010,8 @@ function App() {
             ...styles.blobButton,
             width: size,
             height: size,
-            transform: `translate(-50%, -50%) scale(${blobScale})`
+            transform: `translate(-50%, -50%) scale(${blobScale}) perspective(1200px) rotateX(${parallaxOffset.y * 0.04}deg) rotateY(${parallaxOffset.x * 0.04}deg)`,
+            boxShadow: `0 30px 80px rgba(0, 0, 0, 0.3), inset 0 -20px 40px rgba(0, 0, 0, 0.2)`
           }}
         >
           <img src={blobImage} alt="Central music blob" style={styles.blobImage} draggable={false} />
@@ -1052,8 +1121,9 @@ const styles = {
     borderRadius: "50%",
     cursor: "pointer",
     transition:
-      "width 0.12s ease-out, height 0.12s ease-out, box-shadow 0.12s ease-out, transform 0.12s ease-out",
-    zIndex: 5
+      "width 0.12s ease-out, height 0.12s ease-out, box-shadow 0.12s ease-out, transform 0.08s ease-out",
+    zIndex: 5,
+    transformStyle: "preserve-3d"
   },
   blobImage: {
     display: "block",
